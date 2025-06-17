@@ -5,6 +5,8 @@ import fs from 'fs/promises';
 import path from 'path';
 import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
+import * as WEBIFC from 'web-ifc';
+import * as OBC from '@thatopen/components';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -43,6 +45,33 @@ const ensureFragmentsDir = async () => {
 // Generate SHA-256 hash from filename
 const getFileHash = (filename) => {
   return createHash('sha256').update(filename).digest('hex');
+};
+
+// Initialize IFC loader
+const wasmPath = path.resolve(__dirname, 'web-ifc');
+const initIfcLoader = async () => {
+  const components = new OBC.Components();
+  const fragmentIfcLoader = components.get(OBC.IfcLoader);
+  //await fragmentIfcLoader.setup();
+  fragmentIfcLoader.settings.wasm = {
+  path: `${wasmPath}/`,
+  absolute: true,
+};
+  fragmentIfcLoader.settings.webIfc.COORDINATE_TO_ORIGIN = true;
+  fragmentIfcLoader.settings.webIfc.OPTIMIZE_PROFILES = true;
+  fragmentIfcLoader.settings.webIfc.CIRCLE_SEGMENTS = 12;
+  fragmentIfcLoader.settings.webIfc.SPATIAL_INDEX = true;
+
+  const excludedCats = [
+    WEBIFC.IFCTENDONANCHOR,
+    WEBIFC.IFCREINFORCINGBAR,
+    WEBIFC.IFCREINFORCINGELEMENT,
+  ];
+  for (const cat of excludedCats) {
+    fragmentIfcLoader.settings.excludedCategories.add(cat);
+  }
+
+  return { fragmentIfcLoader, components };
 };
 
 // GET endpoint to check and retrieve .frag and .json files
@@ -117,6 +146,73 @@ app.post('/api/fragments/:filename', async (req, res) => {
   } catch (error) {
     console.error('[POST /api/fragments] Error saving fragments:', error);
     res.status(500).json({ success: false, error: 'Server error' });
+  }
+});
+
+// POST endpoint to convert IFC to .frag and .json
+app.post('/api/convert-ifc/:filename', async (req, res) => {
+  try {
+    const { filename } = req.params;
+    const hash = getFileHash(filename);
+    const fragPath = path.join(FRAGMENTS_DIR, `${hash}.frag`);
+    const jsonPath = path.join(FRAGMENTS_DIR, `${hash}.json`);
+
+    console.log(`[POST /api/convert-ifc] Filename: ${filename}, Hash: ${hash}`);
+    console.log(`[POST /api/convert-ifc] Target frag path: ${fragPath}`);
+    console.log(`[POST /api/convert-ifc] Target json path: ${jsonPath}`);
+
+    // Check if .frag and .json already exist
+    const fragStats = await fs.stat(fragPath).catch(() => null);
+    const jsonStats = await fs.stat(jsonPath).catch(() => null);
+
+    if (fragStats && jsonStats) {
+      console.log('[POST /api/convert-ifc] .frag and .json already exist, skipping conversion');
+      return res.json({
+        success: true,
+        fragUrl: `/fragments/${hash}.frag`,
+        jsonUrl: `/fragments/${hash}.json`,
+      });
+    }
+
+    if (!req.files || !req.files.ifcFile) {
+      console.log('[POST /api/convert-ifc] Missing IFC file');
+      return res.status(400).json({ success: false, error: 'Missing IFC file' });
+    }
+
+    // Initialize IFC loader
+    const { fragmentIfcLoader, components } = await initIfcLoader();
+
+    // Process IFC file
+    const ifcData = req.files.ifcFile.data;
+    const buffer = new Uint8Array(ifcData);
+    const model = await fragmentIfcLoader.load(buffer);
+    model.name = "ifc_bim";
+
+    // Export fragments and properties
+    const fragments = components.get(OBC.FragmentsManager);
+    const fragData = fragments.export(model);
+    const properties = model.getLocalProperties();
+
+    // Save files
+    await ensureFragmentsDir();
+    await fs.writeFile(fragPath, fragData);
+    await fs.writeFile(jsonPath, JSON.stringify(properties));
+
+    console.log(`[POST /api/convert-ifc] Saved .frag: ${fragPath}, Size: ${fragData.length} bytes`);
+    console.log(`[POST /api/convert-ifc] Saved .json: ${jsonPath}, Size: ${JSON.stringify(properties).length} bytes`);
+
+    // Dispose resources
+    fragments.dispose();
+    components.dispose();
+
+    res.json({
+      success: true,
+      fragUrl: `/fragments/${hash}.frag`,
+      jsonUrl: `/fragments/${hash}.json`,
+    });
+  } catch (error) {
+    console.error('[POST /api/convert-ifc] Error processing IFC file:', error);
+    res.status(500).json({ success: false, error: 'Server error during IFC conversion' });
   }
 });
 

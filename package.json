@@ -7,9 +7,11 @@
     "dev": "nodemon server.js"
   },
   "dependencies": {
+    "@thatopen/components": "^2.4.11",
     "cors": "^2.8.5",
     "express": "^4.21.1",
-    "express-fileupload": "^1.5.1"
+    "express-fileupload": "^1.5.1",
+    "web-ifc": "^0.0.68"
   },
   "devDependencies": {
     "nodemon": "^3.1.7"
