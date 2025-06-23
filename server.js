@@ -3,65 +3,58 @@ import cors from 'cors';
 import fileUpload from 'express-fileupload';
 import fs from 'fs/promises';
 import path from 'path';
-import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
 import * as WEBIFC from 'web-ifc';
 import * as OBC from '@thatopen/components';
 
+// Define constants for file paths and server configuration
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-const app = express();
-const PORT = 3000;
 const FRAGMENTS_DIR = path.join(__dirname, 'public', 'fragments');
+const PORT = 3000;
+const WASM_PATH = path.resolve(__dirname, 'web-ifc');
 
-// Middleware
+// Initialize Express app
+const app = express();
+
+// Apply middleware for CORS, file uploads, and JSON parsing
 app.use(cors());
 app.use(fileUpload());
 app.use(express.json());
 
-// Log static file requests
+// Serve static fragment files with correct Content-Type for .frag files
 app.use('/fragments', (req, res, next) => {
-  console.log(`[STATIC] Request for: ${req.path}`);
-  res.on('finish', () => {
-    console.log(`[STATIC] Response for ${req.path}: Status ${res.statusCode}, Content-Type: ${res.get('Content-Type') || 'not set'}`);
-  });
   if (req.path.endsWith('.frag')) {
     res.set('Content-Type', 'application/octet-stream');
   }
   next();
-}, express.static(path.join(__dirname, 'public', 'fragments')));
+}, express.static(FRAGMENTS_DIR));
 
-// Ensure fragments directory exists
-const ensureFragmentsDir = async () => {
-  try {
-    await fs.mkdir(FRAGMENTS_DIR, { recursive: true });
-    console.log('[SERVER] Fragments directory ensured:', FRAGMENTS_DIR);
-  } catch (error) {
-    console.error('[SERVER] Error creating fragments directory:', error);
-  }
-};
+/**
+ * Ensures the fragments directory exists, creating it if necessary.
+ * @returns {Promise<void>}
+ */
+async function ensureFragmentsDir() {
+  await fs.mkdir(FRAGMENTS_DIR, { recursive: true });
+}
 
-// Generate SHA-256 hash from filename
-const getFileHash = (filename) => {
-  return createHash('sha256').update(filename).digest('hex');
-};
-
-// Initialize IFC loader
-const wasmPath = path.resolve(__dirname, 'web-ifc');
-const initIfcLoader = async () => {
+/**
+ * Initializes the IFC loader with predefined settings.
+ * @returns {Promise<{fragmentIfcLoader: OBC.IfcLoader, components: OBC.Components}>}
+ */
+async function initIfcLoader() {
   const components = new OBC.Components();
   const fragmentIfcLoader = components.get(OBC.IfcLoader);
-  //await fragmentIfcLoader.setup();
   fragmentIfcLoader.settings.wasm = {
-  path: `${wasmPath}/`,
-  absolute: true,
-};
+    path: `${WASM_PATH}/`,
+    absolute: true,
+  };
   fragmentIfcLoader.settings.webIfc.COORDINATE_TO_ORIGIN = true;
   fragmentIfcLoader.settings.webIfc.OPTIMIZE_PROFILES = true;
   fragmentIfcLoader.settings.webIfc.CIRCLE_SEGMENTS = 12;
   fragmentIfcLoader.settings.webIfc.SPATIAL_INDEX = true;
 
+  // Exclude specific IFC categories
   const excludedCats = [
     WEBIFC.IFCTENDONANCHOR,
     WEBIFC.IFCREINFORCINGBAR,
@@ -72,44 +65,67 @@ const initIfcLoader = async () => {
   }
 
   return { fragmentIfcLoader, components };
-};
+}
+
+/**
+ * Constructs file paths for fragment and JSON files based on the filename.
+ * @param {string} filename - The original filename.
+ * @returns {{fragPath: string, jsonPath: string, fragUrl: string, jsonUrl: string}}
+ */
+function getFilePaths(filename) {
+  return {
+    fragPath: path.join(FRAGMENTS_DIR, `${filename}.frag`),
+    jsonPath: path.join(FRAGMENTS_DIR, `${filename}.json`),
+    fragUrl: `/fragments/${filename}.frag`,
+    jsonUrl: `/fragments/${filename}.json`,
+  };
+}
+
+/**
+ * Checks if fragment and JSON files exist for a given filename.
+ * @param {string} fragPath - Path to the .frag file.
+ * @param {string} jsonPath - Path to the .json file.
+ * @returns {Promise<{fragExists: boolean, jsonExists: boolean}>}
+ */
+async function checkFilesExist(fragPath, jsonPath) {
+  const [fragStats, jsonStats] = await Promise.all([
+    fs.stat(fragPath).catch(() => null),
+    fs.stat(jsonPath).catch(() => null),
+  ]);
+  return {
+    fragExists: !!fragStats,
+    jsonExists: !!jsonStats,
+  };
+}
+
+/**
+ * Fetches an IFC file from a given URL.
+ * @param {string} url - The URL to the IFC file.
+ * @returns {Promise<Uint8Array>} The file data as a Uint8Array.
+ * @throws {Error} If the fetch fails or the response is not OK.
+ */
+async function fetchIfcFile(url) {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch IFC file: ${response.statusText}`);
+  }
+  const arrayBuffer = await response.arrayBuffer();
+  return new Uint8Array(arrayBuffer);
+}
 
 // GET endpoint to check and retrieve .frag and .json files
 app.get('/api/fragments/:filename', async (req, res) => {
   try {
     const { filename } = req.params;
-    const hash = getFileHash(filename);
-    const fragPath = path.join(FRAGMENTS_DIR, `${hash}.frag`);
-    const jsonPath = path.join(FRAGMENTS_DIR, `${hash}.json`);
-
-    console.log(`[GET /api/fragments] Filename: ${filename}, Hash: ${hash}`);
-    console.log(`[GET /api/fragments] Checking frag path: ${fragPath}`);
-    console.log(`[GET /api/fragments] Checking json path: ${jsonPath}`);
-
-    const fragStats = await fs.stat(fragPath).catch(() => null);
-    const jsonStats = await fs.stat(jsonPath).catch(() => null);
-
-    const fragExists = !!fragStats;
-    const jsonExists = !!jsonStats;
-
-    console.log(`[GET /api/fragments] Frag exists: ${fragExists}${fragExists ? `, Size: ${fragStats.size} bytes` : ''}`);
-    console.log(`[GET /api/fragments] JSON exists: ${jsonExists}${jsonExists ? `, Size: ${jsonStats.size} bytes` : ''}`);
+    const { fragPath, jsonPath, fragUrl, jsonUrl } = getFilePaths(filename);
+    const { fragExists, jsonExists } = await checkFilesExist(fragPath, jsonPath);
 
     if (fragExists && jsonExists) {
-      const fragUrl = `/fragments/${hash}.frag`;
-      const jsonUrl = `/fragments/${hash}.json`;
-      console.log(`[GET /api/fragments] Returning: fragUrl=${fragUrl}, jsonUrl=${jsonUrl}`);
-      res.json({
-        success: true,
-        fragUrl,
-        jsonUrl,
-      });
+      res.json({ success: true, fragUrl, jsonUrl });
     } else {
-      console.log('[GET /api/fragments] Files not found, returning success: false');
       res.json({ success: false });
     }
   } catch (error) {
-    console.error('[GET /api/fragments] Error:', error);
     res.status(500).json({ success: false, error: 'Server error' });
   }
 });
@@ -117,75 +133,49 @@ app.get('/api/fragments/:filename', async (req, res) => {
 // POST endpoint to save .frag and .json files
 app.post('/api/fragments/:filename', async (req, res) => {
   try {
-    const { filename } = req.params;
-    const hash = getFileHash(filename);
-    const fragPath = path.join(FRAGMENTS_DIR, `${hash}.frag`);
-    const jsonPath = path.join(FRAGMENTS_DIR, `${hash}.json`);
-
-    console.log(`[POST /api/fragments] Filename: ${filename}, Hash: ${hash}`);
-    console.log(`[POST /api/fragments] Saving to frag path: ${fragPath}`);
-    console.log(`[POST /api/fragments] Saving to json path: ${jsonPath}`);
-
-    if (!req.files || !req.files.fragFile || !req.files.jsonFile) {
-      console.log('[POST /api/fragments] Missing files');
+    if (!req.files?.fragFile || !req.files?.jsonFile) {
       return res.status(400).json({ success: false, error: 'Missing files' });
     }
 
+    const { filename } = req.params;
+    const { fragPath, jsonPath, fragUrl, jsonUrl } = getFilePaths(filename);
+
     await ensureFragmentsDir();
-    await fs.writeFile(fragPath, req.files.fragFile.data);
-    await fs.writeFile(jsonPath, req.files.jsonFile.data);
+    await Promise.all([
+      fs.writeFile(fragPath, req.files.fragFile.data),
+      fs.writeFile(jsonPath, req.files.jsonFile.data),
+    ]);
 
-    console.log(`[POST /api/fragments] Saved .frag: ${fragPath}, Size: ${req.files.fragFile.data.length} bytes`);
-    console.log(`[POST /api/fragments] Saved .json: ${jsonPath}, Size: ${req.files.jsonFile.data.length} bytes`);
-
-    res.json({
-      success: true,
-      fragUrl: `/fragments/${hash}.frag`,
-      jsonUrl: `/fragments/${hash}.json`,
-    });
+    res.json({ success: true, fragUrl, jsonUrl });
   } catch (error) {
-    console.error('[POST /api/fragments] Error saving fragments:', error);
     res.status(500).json({ success: false, error: 'Server error' });
   }
 });
 
-// POST endpoint to convert IFC to .frag and .json
-app.post('/api/convert-ifc/:filename', async (req, res) => {
+// POST endpoint to convert IFC to .frag and .json using a URL
+app.post('/api/convert-ifc', async (req, res) => {
   try {
-    const { filename } = req.params;
-    const hash = getFileHash(filename);
-    const fragPath = path.join(FRAGMENTS_DIR, `${hash}.frag`);
-    const jsonPath = path.join(FRAGMENTS_DIR, `${hash}.json`);
-
-    console.log(`[POST /api/convert-ifc] Filename: ${filename}, Hash: ${hash}`);
-    console.log(`[POST /api/convert-ifc] Target frag path: ${fragPath}`);
-    console.log(`[POST /api/convert-ifc] Target json path: ${jsonPath}`);
-
-    // Check if .frag and .json already exist
-    const fragStats = await fs.stat(fragPath).catch(() => null);
-    const jsonStats = await fs.stat(jsonPath).catch(() => null);
-
-    if (fragStats && jsonStats) {
-      console.log('[POST /api/convert-ifc] .frag and .json already exist, skipping conversion');
-      return res.json({
-        success: true,
-        fragUrl: `/fragments/${hash}.frag`,
-        jsonUrl: `/fragments/${hash}.json`,
-      });
+    const { filename, ifcUrl } = req.body;
+    if (!filename || !ifcUrl) {
+      return res.status(400).json({ success: false, error: 'Missing filename or IFC URL' });
     }
 
-    if (!req.files || !req.files.ifcFile) {
-      console.log('[POST /api/convert-ifc] Missing IFC file');
-      return res.status(400).json({ success: false, error: 'Missing IFC file' });
+    const { fragPath, jsonPath, fragUrl, jsonUrl } = getFilePaths(filename);
+
+    // Check if files already exist
+    const { fragExists, jsonExists } = await checkFilesExist(fragPath, jsonPath);
+    if (fragExists && jsonExists) {
+      return res.json({ success: true, fragUrl, jsonUrl });
     }
 
-    // Initialize IFC loader
-    const { fragmentIfcLoader, components } = await initIfcLoader();
+    // Fetch IFC file from S3 URL
+    console.log("Downloading file from S3")
+    const ifcData = await fetchIfcFile(ifcUrl);
+    console.log("File Download from S3 complete")
 
     // Process IFC file
-    const ifcData = req.files.ifcFile.data;
-    const buffer = new Uint8Array(ifcData);
-    const model = await fragmentIfcLoader.load(buffer);
+    const { fragmentIfcLoader, components } = await initIfcLoader();
+    const model = await fragmentIfcLoader.load(ifcData);
     model.name = "ifc_bim";
 
     // Export fragments and properties
@@ -195,28 +185,22 @@ app.post('/api/convert-ifc/:filename', async (req, res) => {
 
     // Save files
     await ensureFragmentsDir();
-    await fs.writeFile(fragPath, fragData);
-    await fs.writeFile(jsonPath, JSON.stringify(properties));
+    await Promise.all([
+      fs.writeFile(fragPath, fragData),
+      fs.writeFile(jsonPath, JSON.stringify(properties)),
+    ]);
 
-    console.log(`[POST /api/convert-ifc] Saved .frag: ${fragPath}, Size: ${fragData.length} bytes`);
-    console.log(`[POST /api/convert-ifc] Saved .json: ${jsonPath}, Size: ${JSON.stringify(properties).length} bytes`);
-
-    // Dispose resources
+    // Clean up resources
     fragments.dispose();
     components.dispose();
 
-    res.json({
-      success: true,
-      fragUrl: `/fragments/${hash}.frag`,
-      jsonUrl: `/fragments/${hash}.json`,
-    });
+    res.json({ success: true, fragUrl, jsonUrl });
   } catch (error) {
-    console.error('[POST /api/convert-ifc] Error processing IFC file:', error);
-    res.status(500).json({ success: false, error: 'Server error during IFC conversion' });
+    res.status(500).json({ success: false, error: `Server error during IFC conversion: ${error.message}` });
   }
 });
 
+// Start the server
 app.listen(PORT, async () => {
   await ensureFragmentsDir();
-  console.log(`[SERVER] Running on http://localhost:${PORT}`);
 });
